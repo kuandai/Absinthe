@@ -7,6 +7,7 @@
 #include <deque>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -95,6 +96,250 @@ namespace absinthe
             }
             return value.substr(start, end - start);
         }
+
+        struct StdinQueue
+        {
+            std::mutex mutex;
+            std::deque<std::string> lines;
+        };
+
+        std::shared_ptr<StdinQueue> StartStdinReader()
+        {
+            auto stdin_queue = std::make_shared<StdinQueue>();
+            std::thread stdin_thread([stdin_queue]() {
+                std::string line;
+                while (std::getline(std::cin, line))
+                {
+                    std::lock_guard<std::mutex> lock(stdin_queue->mutex);
+                    stdin_queue->lines.push_back(line);
+                }
+            });
+            stdin_thread.detach();
+            return stdin_queue;
+        }
+
+        void LoadWhitelist(ChatWhitelist& whitelist, const std::string& path, const std::vector<std::string>& entries)
+        {
+            if (std::filesystem::exists(path))
+            {
+                std::string error;
+                if (!whitelist.LoadFromFile(path, &error))
+                {
+                    LOG_ERROR(error);
+                }
+                else
+                {
+                    LOG_INFO("Loaded allowlist from " << path);
+                }
+            }
+
+            for (const auto& entry : entries)
+            {
+                whitelist.AddEntry(entry);
+            }
+
+            if (!entries.empty())
+            {
+                std::string error;
+                if (!whitelist.SaveToFile(path, &error))
+                {
+                    LOG_ERROR(error);
+                }
+            }
+        }
+
+        Botcraft::Status AwaitPlayState(ChatBehaviourClient& client)
+        {
+            const bool ready = Botcraft::Utilities::YieldForCondition([&]() {
+                const auto manager = client.GetNetworkManager();
+                return manager && manager->GetConnectionState() == ProtocolCraft::ConnectionState::Play;
+            }, client, 15000);
+
+            if (!ready)
+            {
+                LOG_ERROR("Timeout waiting for Play state");
+                client.SetShouldBeClosed(true);
+                return Botcraft::Status::Failure;
+            }
+
+            return Botcraft::Status::Success;
+        }
+
+        Botcraft::Status HandleChatLoop(ChatBehaviourClient& client,
+            ChatHandler& chat_handler,
+            ChatWhitelist& whitelist,
+            const std::string& whitelist_path,
+            const std::shared_ptr<StdinQueue>& stdin_queue)
+        {
+            auto send_feedback = [&](const std::string& text, const bool from_console) {
+                if (from_console)
+                {
+                    LOG_INFO(text);
+                }
+                else
+                {
+                    client.SendChatMessage(text);
+                }
+            };
+
+            auto persist_whitelist = [&]() {
+                std::string error;
+                if (!whitelist.SaveToFile(whitelist_path, &error))
+                {
+                    LOG_ERROR(error);
+                }
+            };
+
+            auto handle_command = [&](const ChatParseResult& parsed, const bool from_console, const ChatMessage* message) {
+                if (!parsed.is_command)
+                {
+                    return;
+                }
+
+                if (!parsed.ok)
+                {
+                    send_feedback(parsed.error, from_console);
+                    return;
+                }
+
+                if (!from_console)
+                {
+                    if (!message || !message->has_signature)
+                    {
+                        send_feedback("Secure chat signature missing. Commands require signed chat.", false);
+                        return;
+                    }
+
+                    if (!whitelist.IsAllowed(*message))
+                    {
+                        send_feedback("You are not authorized to issue commands.", false);
+                        return;
+                    }
+                }
+
+                if (parsed.command.name == "allow")
+                {
+                    if (parsed.command.args.empty())
+                    {
+                        send_feedback("Malformed command. Usage: " + chat_handler.GetPrefix() + " allow <name|uuid>.", from_console);
+                        return;
+                    }
+
+                    int added = 0;
+                    for (const auto& entry : parsed.command.args)
+                    {
+                        if (whitelist.AddEntry(entry))
+                        {
+                            ++added;
+                        }
+                    }
+                    if (added == 0)
+                    {
+                        send_feedback("No new entries added to allowlist.", from_console);
+                    }
+                    else
+                    {
+                        send_feedback("Allowlist updated. Added " + std::to_string(added) + " entr"
+                            + (added == 1 ? "y." : "ies."), from_console);
+                        persist_whitelist();
+                    }
+                    return;
+                }
+
+                if (parsed.command.name == "deny")
+                {
+                    if (parsed.command.args.empty())
+                    {
+                        send_feedback("Malformed command. Usage: " + chat_handler.GetPrefix() + " deny <name|uuid>.", from_console);
+                        return;
+                    }
+
+                    int removed = 0;
+                    for (const auto& entry : parsed.command.args)
+                    {
+                        if (whitelist.RemoveEntry(entry))
+                        {
+                            ++removed;
+                        }
+                    }
+                    if (removed == 0)
+                    {
+                        send_feedback("No matching entries found in allowlist.", from_console);
+                    }
+                    else
+                    {
+                        send_feedback("Allowlist updated. Removed " + std::to_string(removed) + " entr"
+                            + (removed == 1 ? "y." : "ies."), from_console);
+                        persist_whitelist();
+                    }
+                    return;
+                }
+
+                if (parsed.command.name == "list")
+                {
+                    send_feedback(whitelist.FormatEntries(), from_console);
+                    return;
+                }
+
+                std::optional<std::string> response = chat_handler.HandleCommand(parsed.command);
+                if (response.has_value())
+                {
+                    send_feedback(response.value(), from_console);
+                }
+            };
+
+            auto parse_console = [&](const std::string& line) {
+                std::string trimmed = Trim(line);
+                if (trimmed.empty())
+                {
+                    return ChatParseResult{};
+                }
+
+                if (trimmed.rfind(chat_handler.GetPrefix(), 0) != 0)
+                {
+                    trimmed = chat_handler.GetPrefix() + " " + trimmed;
+                }
+
+                return chat_handler.Parse(trimmed);
+            };
+
+            ChatMessage message;
+            while (client.PopChatMessage(message))
+            {
+                ChatParseResult parsed = chat_handler.Parse(message.content);
+                handle_command(parsed, false, &message);
+            }
+
+            std::deque<std::string> pending;
+            {
+                std::lock_guard<std::mutex> lock(stdin_queue->mutex);
+                pending.swap(stdin_queue->lines);
+            }
+
+            for (const auto& line : pending)
+            {
+                ChatParseResult parsed = parse_console(line);
+                handle_command(parsed, true, nullptr);
+            }
+
+            client.Yield();
+            return Botcraft::Status::Failure;
+        }
+
+        auto BuildBehaviourTree(ChatHandler& chat_handler,
+            ChatWhitelist& whitelist,
+            const std::string& whitelist_path,
+            const std::shared_ptr<StdinQueue>& stdin_queue)
+        {
+            return Botcraft::Builder<ChatBehaviourClient>("startup")
+                .sequence()
+                    .leaf("await play state", AwaitPlayState)
+                    .repeater("chat loop", 0)
+                        .leaf("chat handler", [&](ChatBehaviourClient& client) {
+                            return HandleChatLoop(client, chat_handler, whitelist, whitelist_path, stdin_queue);
+                        })
+                    .end();
+        }
     }
 
     void ShowHelp(const char* argv0)
@@ -119,221 +364,10 @@ namespace absinthe
         ChatHandler chat_handler;
         ChatWhitelist whitelist;
         const std::string whitelist_path = "whitelist.yaml";
-        if (std::filesystem::exists(whitelist_path))
-        {
-            std::string error;
-            if (!whitelist.LoadFromFile(whitelist_path, &error))
-            {
-                LOG_ERROR(error);
-            }
-            else
-            {
-                LOG_INFO("Loaded allowlist from " << whitelist_path);
-            }
-        }
-        for (const auto& entry : args.allow_list)
-        {
-            whitelist.AddEntry(entry);
-        }
-        if (!args.allow_list.empty())
-        {
-            std::string error;
-            if (!whitelist.SaveToFile(whitelist_path, &error))
-            {
-                LOG_ERROR(error);
-            }
-        }
+        LoadWhitelist(whitelist, whitelist_path, args.allow_list);
 
-        struct StdinQueue
-        {
-            std::mutex mutex;
-            std::deque<std::string> lines;
-        };
-
-        auto stdin_queue = std::make_shared<StdinQueue>();
-        std::thread stdin_thread([stdin_queue]() {
-            std::string line;
-            while (std::getline(std::cin, line))
-            {
-                std::lock_guard<std::mutex> lock(stdin_queue->mutex);
-                stdin_queue->lines.push_back(line);
-            }
-        });
-        stdin_thread.detach();
-        auto behaviour_tree = Botcraft::Builder<ChatBehaviourClient>("startup")
-            .sequence()
-                .leaf("await play state", [](ChatBehaviourClient& client) {
-                    const bool ready = Botcraft::Utilities::YieldForCondition([&]() {
-                        const auto manager = client.GetNetworkManager();
-                        return manager && manager->GetConnectionState() == ProtocolCraft::ConnectionState::Play;
-                    }, client, 15000);
-
-                    if (!ready)
-                    {
-                        LOG_ERROR("Timeout waiting for Play state");
-                        client.SetShouldBeClosed(true);
-                        return Botcraft::Status::Failure;
-                    }
-
-                    return Botcraft::Status::Success;
-                })
-                .repeater("chat loop", 0)
-                    .leaf("chat handler", [&chat_handler, &whitelist, &whitelist_path, stdin_queue](ChatBehaviourClient& client) {
-                        auto send_feedback = [&](const std::string& text, const bool from_console) {
-                            if (from_console)
-                            {
-                                LOG_INFO(text);
-                            }
-                            else
-                            {
-                                client.SendChatMessage(text);
-                            }
-                        };
-
-                        auto persist_whitelist = [&]() {
-                            std::string error;
-                            if (!whitelist.SaveToFile(whitelist_path, &error))
-                            {
-                                LOG_ERROR(error);
-                            }
-                        };
-
-                        auto handle_command = [&](const ChatParseResult& parsed, const bool from_console, const ChatMessage* message) {
-                            if (!parsed.is_command)
-                            {
-                                return;
-                            }
-
-                            if (!parsed.ok)
-                            {
-                                send_feedback(parsed.error, from_console);
-                                return;
-                            }
-
-                            if (!from_console)
-                            {
-                                if (!message || !message->has_signature)
-                                {
-                                    send_feedback("Secure chat signature missing. Commands require signed chat.", false);
-                                    return;
-                                }
-
-                                if (!whitelist.IsAllowed(*message))
-                                {
-                                    send_feedback("You are not authorized to issue commands.", false);
-                                    return;
-                                }
-                            }
-
-                            if (parsed.command.name == "allow")
-                            {
-                                if (parsed.command.args.empty())
-                                {
-                                    send_feedback("Malformed command. Usage: " + chat_handler.GetPrefix() + " allow <name|uuid>.", from_console);
-                                    return;
-                                }
-
-                                int added = 0;
-                                for (const auto& entry : parsed.command.args)
-                                {
-                                    if (whitelist.AddEntry(entry))
-                                    {
-                                        ++added;
-                                    }
-                                }
-                                if (added == 0)
-                                {
-                                    send_feedback("No new entries added to allowlist.", from_console);
-                                }
-                                else
-                                {
-                                    send_feedback("Allowlist updated. Added " + std::to_string(added) + " entr"
-                                        + (added == 1 ? "y." : "ies."), from_console);
-                                    persist_whitelist();
-                                }
-                                return;
-                            }
-
-                            if (parsed.command.name == "deny")
-                            {
-                                if (parsed.command.args.empty())
-                                {
-                                    send_feedback("Malformed command. Usage: " + chat_handler.GetPrefix() + " deny <name|uuid>.", from_console);
-                                    return;
-                                }
-
-                                int removed = 0;
-                                for (const auto& entry : parsed.command.args)
-                                {
-                                    if (whitelist.RemoveEntry(entry))
-                                    {
-                                        ++removed;
-                                    }
-                                }
-                                if (removed == 0)
-                                {
-                                    send_feedback("No matching entries found in allowlist.", from_console);
-                                }
-                                else
-                                {
-                                    send_feedback("Allowlist updated. Removed " + std::to_string(removed) + " entr"
-                                        + (removed == 1 ? "y." : "ies."), from_console);
-                                    persist_whitelist();
-                                }
-                                return;
-                            }
-
-                            if (parsed.command.name == "list")
-                            {
-                                send_feedback(whitelist.FormatEntries(), from_console);
-                                return;
-                            }
-
-                            std::optional<std::string> response = chat_handler.HandleCommand(parsed.command);
-                            if (response.has_value())
-                            {
-                                send_feedback(response.value(), from_console);
-                            }
-                        };
-
-                        auto parse_console = [&](const std::string& line) {
-                            std::string trimmed = Trim(line);
-                            if (trimmed.empty())
-                            {
-                                return ChatParseResult{};
-                            }
-
-                            if (trimmed.rfind(chat_handler.GetPrefix(), 0) != 0)
-                            {
-                                trimmed = chat_handler.GetPrefix() + " " + trimmed;
-                            }
-
-                            return chat_handler.Parse(trimmed);
-                        };
-
-                        ChatMessage message;
-                        while (client.PopChatMessage(message))
-                        {
-                            ChatParseResult parsed = chat_handler.Parse(message.content);
-                            handle_command(parsed, false, &message);
-                        }
-
-                        std::deque<std::string> pending;
-                        {
-                            std::lock_guard<std::mutex> lock(stdin_queue->mutex);
-                            pending.swap(stdin_queue->lines);
-                        }
-
-                        for (const auto& line : pending)
-                        {
-                            ChatParseResult parsed = parse_console(line);
-                            handle_command(parsed, true, nullptr);
-                        }
-
-                        client.Yield();
-                        return Botcraft::Status::Failure;
-                    })
-                .end();
+        auto stdin_queue = StartStdinReader();
+        auto behaviour_tree = BuildBehaviourTree(chat_handler, whitelist, whitelist_path, stdin_queue);
 
         ChatBehaviourClient client(false);
         client.SetAutoRespawn(true);
