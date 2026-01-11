@@ -75,12 +75,66 @@ target_include_directories(Absinthe
         "${BOTCRAFT_INCLUDE_DIR}"
         "${PROTOCOLCRAFT_INCLUDE_DIR}"
 )
+if(DEFINED rapidyaml_INCLUDE_DIRS_RELEASE)
+    target_include_directories(Absinthe
+        PRIVATE
+            $<$<NOT:$<CONFIG:Release>>:${rapidyaml_INCLUDE_DIRS_RELEASE}>
+    )
+endif()
+if(DEFINED c4core_INCLUDE_DIRS_RELEASE)
+    target_include_directories(Absinthe
+        PRIVATE
+            $<$<NOT:$<CONFIG:Release>>:${c4core_INCLUDE_DIRS_RELEASE}>
+    )
+endif()
+if(DEFINED fast_float_INCLUDE_DIRS_RELEASE)
+    target_include_directories(Absinthe
+        PRIVATE
+            $<$<NOT:$<CONFIG:Release>>:${fast_float_INCLUDE_DIRS_RELEASE}>
+    )
+endif()
+if(DEFINED fast_float_FastFloat_fast_float_INCLUDE_DIRS_RELEASE)
+    target_include_directories(Absinthe
+        PRIVATE
+            $<$<NOT:$<CONFIG:Release>>:${fast_float_FastFloat_fast_float_INCLUDE_DIRS_RELEASE}>
+    )
+endif()
 target_link_libraries(Absinthe
     PUBLIC
         botcraft
         protocolCraft
         ryml::ryml
 )
+if(DEFINED rapidyaml_LIB_DIRS_RELEASE)
+    target_link_directories(Absinthe
+        PUBLIC
+            $<$<NOT:$<CONFIG:Release>>:${rapidyaml_LIB_DIRS_RELEASE}>
+    )
+endif()
+if(DEFINED rapidyaml_LIBS_RELEASE)
+    target_link_libraries(Absinthe
+        PUBLIC
+            $<$<NOT:$<CONFIG:Release>>:${rapidyaml_LIBS_RELEASE}>
+    )
+endif()
+if(DEFINED c4core_LIB_DIRS_RELEASE)
+    target_link_directories(Absinthe
+        PUBLIC
+            $<$<NOT:$<CONFIG:Release>>:${c4core_LIB_DIRS_RELEASE}>
+    )
+endif()
+if(DEFINED c4core_LIBS_RELEASE)
+    target_link_libraries(Absinthe
+        PUBLIC
+            $<$<NOT:$<CONFIG:Release>>:${c4core_LIBS_RELEASE}>
+    )
+endif()
+if(DEFINED c4core_SYSTEM_LIBS_RELEASE)
+    target_link_libraries(Absinthe
+        PUBLIC
+            $<$<NOT:$<CONFIG:Release>>:${c4core_SYSTEM_LIBS_RELEASE}>
+    )
+endif()
 target_compile_definitions(Absinthe
     PRIVATE
         PROTOCOL_VERSION=${BOTCRAFT_PROTOCOL_VERSION}

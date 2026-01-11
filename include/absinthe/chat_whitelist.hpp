@@ -14,6 +14,8 @@ namespace absinthe
         bool AddEntry(const std::string& entry);
         bool RemoveEntry(const std::string& entry);
         bool IsEmpty() const;
+        bool LoadFromFile(const std::string& path, std::string* error = nullptr);
+        bool SaveToFile(const std::string& path, std::string* error = nullptr) const;
         bool IsAllowed(const ChatMessage& message) const;
         std::string FormatEntries() const;
 

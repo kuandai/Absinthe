@@ -5,6 +5,7 @@
 
 #include <cctype>
 #include <deque>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -117,9 +118,30 @@ namespace absinthe
 
         ChatHandler chat_handler;
         ChatWhitelist whitelist;
+        const std::string whitelist_path = "whitelist.yaml";
+        if (std::filesystem::exists(whitelist_path))
+        {
+            std::string error;
+            if (!whitelist.LoadFromFile(whitelist_path, &error))
+            {
+                LOG_ERROR(error);
+            }
+            else
+            {
+                LOG_INFO("Loaded allowlist from " << whitelist_path);
+            }
+        }
         for (const auto& entry : args.allow_list)
         {
             whitelist.AddEntry(entry);
+        }
+        if (!args.allow_list.empty())
+        {
+            std::string error;
+            if (!whitelist.SaveToFile(whitelist_path, &error))
+            {
+                LOG_ERROR(error);
+            }
         }
 
         struct StdinQueue
@@ -156,7 +178,7 @@ namespace absinthe
                     return Botcraft::Status::Success;
                 })
                 .repeater("chat loop", 0)
-                    .leaf("chat handler", [&chat_handler, &whitelist, stdin_queue](ChatBehaviourClient& client) {
+                    .leaf("chat handler", [&chat_handler, &whitelist, &whitelist_path, stdin_queue](ChatBehaviourClient& client) {
                         auto send_feedback = [&](const std::string& text, const bool from_console) {
                             if (from_console)
                             {
@@ -165,6 +187,14 @@ namespace absinthe
                             else
                             {
                                 client.SendChatMessage(text);
+                            }
+                        };
+
+                        auto persist_whitelist = [&]() {
+                            std::string error;
+                            if (!whitelist.SaveToFile(whitelist_path, &error))
+                            {
+                                LOG_ERROR(error);
                             }
                         };
 
@@ -219,6 +249,7 @@ namespace absinthe
                                 {
                                     send_feedback("Allowlist updated. Added " + std::to_string(added) + " entr"
                                         + (added == 1 ? "y." : "ies."), from_console);
+                                    persist_whitelist();
                                 }
                                 return;
                             }
@@ -247,6 +278,7 @@ namespace absinthe
                                 {
                                     send_feedback("Allowlist updated. Removed " + std::to_string(removed) + " entr"
                                         + (removed == 1 ? "y." : "ies."), from_console);
+                                    persist_whitelist();
                                 }
                                 return;
                             }

@@ -2,6 +2,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <string>
+
+#include <ryml.hpp>
+#include <ryml_std.hpp>
 
 namespace absinthe
 {
@@ -98,6 +103,110 @@ namespace absinthe
     bool ChatWhitelist::IsEmpty() const
     {
         return allowed_uuids.empty() && allowed_names.empty();
+    }
+
+    bool ChatWhitelist::LoadFromFile(const std::string& path, std::string* error)
+    {
+        std::ifstream file(path);
+        if (!file.is_open())
+        {
+            if (error)
+            {
+                *error = "Unable to open whitelist file: " + path;
+            }
+            return false;
+        }
+
+        std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
+
+        try
+        {
+            ryml::Tree tree = ryml::parse_in_arena(ryml::to_csubstr(path), ryml::to_csubstr(contents));
+            ryml::ConstNodeRef root = tree.rootref();
+            ryml::ConstNodeRef list_node = root;
+            if (root.has_child(ryml::to_csubstr("whitelist")))
+            {
+                list_node = root[ryml::to_csubstr("whitelist")];
+            }
+
+            allowed_uuids.clear();
+            allowed_names.clear();
+
+            if (!list_node.readable())
+            {
+                return true;
+            }
+
+            if (!list_node.is_seq())
+            {
+                if (error)
+                {
+                    *error = "Whitelist file must contain a sequence under \"whitelist\".";
+                }
+                return false;
+            }
+
+            for (ryml::ConstNodeRef child : list_node.children())
+            {
+                if (!child.readable())
+                {
+                    continue;
+                }
+                std::string entry;
+                child >> entry;
+                AddEntry(entry);
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            if (error)
+            {
+                *error = std::string("Failed to parse whitelist file: ") + ex.what();
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ChatWhitelist::SaveToFile(const std::string& path, std::string* error) const
+    {
+        ryml::Tree tree;
+        ryml::NodeRef root = tree.rootref();
+        root |= ryml::MAP;
+        ryml::NodeRef list_node = root[ryml::to_csubstr("whitelist")];
+        list_node |= ryml::SEQ;
+
+        for (const auto& name : allowed_names)
+        {
+            list_node.append_child() << name;
+        }
+        for (const auto& uuid : allowed_uuids)
+        {
+            list_node.append_child() << FormatUuid(uuid);
+        }
+
+        std::string output = ryml::emitrs_yaml<std::string>(tree);
+
+        std::ofstream file(path, std::ios::trunc);
+        if (!file.is_open())
+        {
+            if (error)
+            {
+                *error = "Unable to write whitelist file: " + path;
+            }
+            return false;
+        }
+
+        file << output;
+        if (!file.good() && error)
+        {
+            *error = "Failed while writing whitelist file: " + path;
+            return false;
+        }
+
+        return true;
     }
 
     bool ChatWhitelist::IsAllowed(const ChatMessage& message) const
