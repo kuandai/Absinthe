@@ -9,6 +9,11 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type (Debug or Release)" FORCE)
 endif()
 
+# Allow CMakeDeps-generated config files without a toolchain preset.
+if(EXISTS "${CMAKE_BINARY_DIR}/ryml-config.cmake")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
+endif()
+
 set(BOTCRAFT_ROOT "/usr/local/lib/botcraft")
 set(BOTCRAFT_LIB_DIR "${BOTCRAFT_ROOT}/bin")
 set(BOTCRAFT_INCLUDE_DIR "${BOTCRAFT_ROOT}/botcraft/include")
@@ -61,6 +66,8 @@ list(REMOVE_ITEM SOURCES
 
 add_library(Absinthe ${SOURCES})
 
+find_package(ryml REQUIRED)
+
 target_include_directories(Absinthe
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -72,6 +79,7 @@ target_link_libraries(Absinthe
     PUBLIC
         botcraft
         protocolCraft
+        ryml::ryml
 )
 target_compile_definitions(Absinthe
     PRIVATE
